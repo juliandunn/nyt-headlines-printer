@@ -1,0 +1,7 @@
+{
+  "nyt_api_key": "<fill in>",
+  "section": "home",
+  "poll_interval_seconds": 300,
+  "printer_name": "oki520",
+  "state_path": "printed_ids.json"
+}
