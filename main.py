@@ -101,12 +101,11 @@ def fetch_top_stories(api_key: str, section: str) -> list:
 
 
 
-def print_story(title: str, abstract: str, printer: str):
+def print_story(payload: str, printer: str):
     """Send plain‑text to the configured CUPS printer.
 
     CUPS reads from stdin when the final argument is "-".
     """
-    payload = f"{title}\n{'=' * len(title)}\n\n{abstract}\n\n"
     subprocess.run(
         ["lp", "-d", printer, "-"],
         input=payload.encode("utf-8"),
@@ -155,12 +154,13 @@ def main():
                     printed_ids.add(uid)
                     continue
 
+                payload = f"{title}\n{'=' * len(title)}\n\n{lead}\n"
                 if teletype:
-                    print_story(title, lead, cfg["printer_name"])
+                    print_story(payload, cfg["printer_name"])
+                    logger.info(f"Printed: {title}")
                 else:
-                    print(f"{title}\n{'=' * len(title)}\n\n{lead}\n")
+                    print(payload)
                 printed_ids.add(uid)
-                logger.info(f"Printed: {title}")
             save_state(state_path, printed_ids)
         except Exception as e:
             logger.exception("Error during polling/printing")
