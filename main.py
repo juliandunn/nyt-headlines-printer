@@ -13,7 +13,8 @@ import subprocess
 import requests
 import urllib.parse
 import argparse
-
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -99,7 +100,10 @@ def fetch_top_stories(api_key: str, section: str) -> list:
     resp.raise_for_status()
     return resp.json().get("results", [])
 
-
+def format_date(date_string):
+    dt = datetime.fromisoformat(date_string)
+    dt = dt.astimezone(ZoneInfo("America/New_York"))
+    return dt.strftime("%m/%d/%Y %I:%M:%S %p %Z")
 
 def print_story(payload: str, printer: str):
     """Send plain‑text to the configured CUPS printer.
@@ -154,7 +158,8 @@ def main():
                     printed_ids.add(uid)
                     continue
 
-                payload = f"{title}\n{'=' * len(title)}\n\n{lead}\n"
+                published_date = format_date(art.get("published_date"))
+                payload = f"{published_date}\n{title}\n{lead}\n\n".upper()
                 if teletype:
                     print_story(payload, cfg["printer_name"])
                     logger.info(f"Printed: {title}")
