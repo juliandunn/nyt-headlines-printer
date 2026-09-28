@@ -13,6 +13,7 @@ import subprocess
 import datetime
 import argparse
 import re
+import http.cookiejar
 
 import requests
 
@@ -91,10 +92,43 @@ def fetch_top_stories(api_key: str, section: str) -> list:
     return resp.json().get("results", [])
 
 
+def load_cookie_jar(cookies_path: pathlib.Path) -> http.cookiejar.MozillaCookieJar | None:
+    """Load a MozillaCookieJar from a cookies file.
+
+    Handles standard tab-separated files as well as space-separated files
+    or millisecond timestamps gracefully.
+    """
+    if not cookies_path.is_file():
+        return None
+    cj = http.cookiejar.MozillaCookieJar()
+    try:
+        cj.load(cookies_path, ignore_discard=True, ignore_expires=True)
+        return cj
+    except Exception:
+        try:
+            import io
+            lines = cookies_path.read_text().splitlines()
+            fixed_lines = ["# Netscape HTTP Cookie File"]
+            for line in lines:
+                if line.strip() and not line.startswith("#"):
+                    parts = line.split()
+                    if len(parts) >= 7:
+                        if parts[4].isdigit() and int(parts[4]) > 10000000000:
+                            parts[4] = str(int(parts[4]) // 1000)
+                        fixed_lines.append("\t".join(parts[:7]))
+            temp_cj = http.cookiejar.MozillaCookieJar()
+            temp_cj._really_load(io.StringIO("\n".join(fixed_lines)), str(cookies_path), True, True)
+            return temp_cj
+        except Exception as exc:
+            logging.getLogger(__name__).debug(f"Failed to load cookies.txt: {exc}")
+            return None
+
+
 def fetch_paragraphs_from_uri(uri: str, api_key: str) -> list:
     """Fetch up to three paragraphs from the article identified by its NYT ``uri``.
 
-    Uses the Article Search API to get the web URL, then scrapes the HTML.
+    Uses the Article Search API to get the web URL, then scrapes the HTML
+    using cookies from cookies.txt if available.
     Returns a list of up to 3 paragraph strings (empty list on failure).
     """
     if not uri:
@@ -111,7 +145,11 @@ def fetch_paragraphs_from_uri(uri: str, api_key: str) -> list:
         article_url = docs[0].get("web_url")
         if not article_url:
             return []
-        page_resp = requests.get(article_url, timeout=10)
+
+        cookies_path = pathlib.Path(__file__).with_name("cookies.txt")
+        cookie_jar = load_cookie_jar(cookies_path)
+
+        page_resp = requests.get(article_url, cookies=cookie_jar, timeout=10)
         page_resp.raise_for_status()
         html = page_resp.text
         raw = re.findall(r'<p[^>]*>(.*?)</p>', html, re.DOTALL | re.IGNORECASE)
@@ -150,19 +188,22 @@ def main():
     state_path = pathlib.Path(cfg["state_path"])
     state = load_state(state_path)
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
-    logger = logging.getLogger(__name__)
-
     parser = argparse.ArgumentParser(
         description="NYT headline daemon – default prints to STDOUT; use -t/--teletype to send to printer"
     )
     parser.add_argument("-t", "--teletype", action="store_true",
                         help="Redirect output to the configured teletype printer")
+    parser.add_argument("-d", "--debug", action="store_true",
+                        help="Enable debug logging level")
     args = parser.parse_args()
     teletype = args.teletype
+
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    logger = logging.getLogger(__name__)
 
     while True:
         try:
@@ -179,12 +220,13 @@ def main():
                 # Uppercase headline
                 title = art.get("title", "(no title)").upper()
 
-                # Use abstract if available
-                lead = art.get("abstract")
-                if lead:
-                    paragraphs = [lead]
-                else:
-                    paragraphs = fetch_paragraphs_from_uri(uid, cfg["nyt_api_key"])
+                # Try scraping paragraphs from article web URL first
+                paragraphs = fetch_paragraphs_from_uri(uid, cfg["nyt_api_key"])
+                if not paragraphs:
+                    # Fall back to abstract from Top Stories payload if scraping failed
+                    abstract = art.get("abstract")
+                    if abstract:
+                        paragraphs = [abstract]
 
                 if not paragraphs:
                     # Nothing printable – mark seen to avoid repeated attempts
