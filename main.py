@@ -173,7 +173,13 @@ def fetch_paragraphs_from_uri(uri: str, api_key: str) -> list:
         cookies_path = pathlib.Path(__file__).with_name("cookies.txt")
         cookie_jar = load_cookie_jar(cookies_path)
 
-        page_resp = requests.get(article_url, cookies=cookie_jar, timeout=10)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        page_resp = requests.get(article_url, headers=headers, cookies=cookie_jar, timeout=10)
         page_resp.raise_for_status()
         html_text = page_resp.content.decode("utf-8", errors="replace")
         raw = re.findall(r'<p[^>]*>(.*?)</p>', html_text, re.DOTALL | re.IGNORECASE)
