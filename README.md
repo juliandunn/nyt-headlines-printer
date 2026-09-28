@@ -69,6 +69,12 @@ python3 main.py
 python3 main.py --teletype
 # or
 python3 main.py -t
+
+# Run with debug logging
+python3 main.py -d
+
+# Run unit tests
+python3 -m unittest test_main.py
 ```
 
 ### Example output

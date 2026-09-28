@@ -12,6 +12,7 @@ import logging
 import subprocess
 import datetime
 import argparse
+import html
 import re
 import http.cookiejar
 
@@ -65,6 +66,26 @@ def save_state(state_path: pathlib.Path, state: dict):
 # Formatting helpers
 # ---------------------------------------------------------------------------
 
+def clean_text(text: str) -> str:
+    """Clean text by unescaping HTML entities, mapping smart punctuation to
+
+    ASCII equivalents, and ensuring valid UTF-8 encoding for CUPS printing.
+    """
+    if not text:
+        return ""
+    text = html.unescape(text)
+    replacements = {
+        "\u2018": "'", "\u2019": "'", "\u201b": "'",
+        "\u201c": '"', "\u201d": '"', "\u201f": '"',
+        "\u2013": "-", "\u2014": "-", "\u2015": "-",
+        "\u2026": "...",
+        "\xa0": " ", "\u200b": "", "\ufeff": "",
+    }
+    for orig, repl in replacements.items():
+        text = text.replace(orig, repl)
+    return text.encode("utf-8", errors="replace").decode("utf-8")
+
+
 def format_updated(updated: str) -> str:
     """Parse an ISO 8601 timestamp and return a human-readable date + time string.
 
@@ -102,7 +123,10 @@ def load_cookie_jar(cookies_path: pathlib.Path) -> http.cookiejar.MozillaCookieJ
         return None
     cj = http.cookiejar.MozillaCookieJar()
     try:
-        cj.load(cookies_path, ignore_discard=True, ignore_expires=True)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            cj.load(cookies_path, ignore_discard=True, ignore_expires=True)
         return cj
     except Exception:
         try:
@@ -151,11 +175,11 @@ def fetch_paragraphs_from_uri(uri: str, api_key: str) -> list:
 
         page_resp = requests.get(article_url, cookies=cookie_jar, timeout=10)
         page_resp.raise_for_status()
-        html = page_resp.text
-        raw = re.findall(r'<p[^>]*>(.*?)</p>', html, re.DOTALL | re.IGNORECASE)
+        html_text = page_resp.content.decode("utf-8", errors="replace")
+        raw = re.findall(r'<p[^>]*>(.*?)</p>', html_text, re.DOTALL | re.IGNORECASE)
         cleaned = []
         for p in raw:
-            text = re.sub(r'<[^>]+>', '', p).strip()
+            text = clean_text(re.sub(r'<[^>]+>', '', p)).strip()
             if text:
                 cleaned.append(text)
             if len(cleaned) >= 3:
@@ -172,9 +196,10 @@ def fetch_paragraphs_from_uri(uri: str, api_key: str) -> list:
 
 def print_story(payload: str, printer: str):
     """Send plain-text payload to the configured CUPS printer via stdin."""
+    cleaned_payload = clean_text(payload)
     subprocess.run(
         ["lp", "-d", printer, "-"],
-        input=payload.encode("utf-8"),
+        input=cleaned_payload.encode("utf-8", errors="replace"),
         check=True,
     )
 
@@ -218,7 +243,7 @@ def main():
                 date_str = format_updated(updated)
 
                 # Uppercase headline
-                title = art.get("title", "(no title)").upper()
+                title = clean_text(art.get("title", "(no title)")).upper()
 
                 # Try scraping paragraphs from article web URL first
                 paragraphs = fetch_paragraphs_from_uri(uid, cfg["nyt_api_key"])
@@ -226,7 +251,7 @@ def main():
                     # Fall back to abstract from Top Stories payload if scraping failed
                     abstract = art.get("abstract")
                     if abstract:
-                        paragraphs = [abstract]
+                        paragraphs = [clean_text(abstract)]
 
                 if not paragraphs:
                     # Nothing printable – mark seen to avoid repeated attempts
