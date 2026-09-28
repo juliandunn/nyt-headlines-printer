@@ -2,7 +2,7 @@
 """NYT Headline Teletype Daemon for Raspberry Pi (Raspbian)
 
 Continuously polls the New York Times Top Stories API, prints new headlines
-and the first paragraph to a CUPS printer (e.g., OKI520) via the `lp`
+and the first three paragraphs to a CUPS printer (e.g., OKI520) via the `lp`
 command, and remembers which stories have already been printed.
 """
 import json
@@ -10,14 +10,15 @@ import pathlib
 import time
 import logging
 import subprocess
-import requests
-import urllib.parse
+import datetime
 import argparse
-from datetime import datetime
-from zoneinfo import ZoneInfo
+import re
+
+import requests
+
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Configuration
 # ---------------------------------------------------------------------------
 
 def load_config() -> dict:
@@ -25,96 +26,120 @@ def load_config() -> dict:
     return json.loads(cfg_path.read_text())
 
 
-def load_state(state_path: pathlib.Path) -> set:
-    if state_path.is_file():
-        return set(json.loads(state_path.read_text()))
-    return set()
-
-
-def save_state(state_path: pathlib.Path, ids: set):
-    state_path.write_text(json.dumps(list(ids)))
-
-
 # ---------------------------------------------------------------------------
-# Helper to fetch lead paragraph via Article Search API using the article's URI
+# State persistence (TTL-pruned dict: {uri -> printed_at_iso})
 # ---------------------------------------------------------------------------
 
-def fetch_lead_paragraph_from_uri(uri: str, api_key: str) -> str:
-    """Retrieve the lead paragraph for an article identified by its NYT ``uri``.
+_TTL_DAYS = 5
 
-    The NYT Article Search API supports a filter query (``fq``) on the ``uri``
-    field.  We request the ``lead_paragraph`` field and return it if present.
-    If the API call fails or the field is missing, we fall back to fetching the
-    article's web page and extracting the first paragraph from the HTML.
+
+def load_state(state_path: pathlib.Path) -> dict:
+    """Load printed-article state, pruning entries older than _TTL_DAYS days.
+
+    State is stored as {uri: printed_at_iso} so we can discard stale entries.
+    Articles disappear from the NYT Top Stories feed within a few days, so
+    there is no need to remember them indefinitely.
     """
-    if not uri:
-        return ""
-    # Build filter query for the Article Search API.
-    fq = f'uri:"{uri}"'
-    search_url = "https://api.nytimes.com/svc/search/v2/articlesearch.json"
-    params = {
-        "fq": fq,
-        "api-key": api_key,
-        "sort": "oldest",
-        "page": 0,
-    }
+    if not state_path.is_file():
+        return {}
+    cutoff = datetime.datetime.now(tz=datetime.timezone.utc) - datetime.timedelta(days=_TTL_DAYS)
     try:
-        resp = requests.get(search_url, params=params, timeout=10)
-        resp.raise_for_status()
-        docs = resp.json().get("response", {}).get("docs", [])
-        if not docs:
-            return ""
-        # Prefer the lead_paragraph if available.
-        lead = docs[0].get("lead_paragraph", "")
-        if lead:
-            return lead
-        # Otherwise attempt to scrape the first paragraph from the article URL.
-        article_url = docs[0].get("web_url")
-        if not article_url:
-            return ""
-        page_resp = requests.get(article_url, timeout=10)
-        page_resp.raise_for_status()
-        html = page_resp.text
-        # Simple regex to find the first <p> element with non‑empty content.
-        import re
-        match = re.search(r'<p[^>]*>(.*?)</p>', html, re.DOTALL | re.IGNORECASE)
-        if match:
-            # Strip HTML tags that may be inside the paragraph.
-            paragraph = re.sub(r'<[^>]+>', '', match.group(1))
-            return paragraph.strip()
-        return ""
-    except Exception as exc:
-        logging.getLogger(__name__).debug(
-            f"Failed to fetch lead paragraph for uri {uri}: {exc}"
-        )
-        return ""
+        data = json.loads(state_path.read_text())
+        # Support old list-style state files gracefully.
+        if isinstance(data, list):
+            return {}
+        return {
+            uri: ts for uri, ts in data.items()
+            if datetime.datetime.fromisoformat(ts) > cutoff
+        }
+    except Exception:
+        return {}
+
+
+def save_state(state_path: pathlib.Path, state: dict):
+    state_path.write_text(json.dumps(state))
+
 
 # ---------------------------------------------------------------------------
-# Main loop modifications to use the new helper
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
+def format_updated(updated: str) -> str:
+    """Parse an ISO 8601 timestamp and return a human-readable date + time string.
+
+    Output format: YYYY-MM-DD HH:MM AM/PM ±HHMM
+    Falls back to the raw string on parse failure.
+    """
+    if not updated:
+        return ""
+    try:
+        dt = datetime.datetime.fromisoformat(updated)
+        return dt.strftime("%Y-%m-%d %I:%M %p %z").strip()
+    except ValueError:
+        return updated
+
+
+# ---------------------------------------------------------------------------
+# NYT API helpers
 # ---------------------------------------------------------------------------
 
 def fetch_top_stories(api_key: str, section: str) -> list:
-    """Return list of top‑story articles for the given section."""
+    """Return list of top-story articles for the given section."""
     url = f"https://api.nytimes.com/svc/topstories/v2/{section}.json"
     resp = requests.get(url, params={"api-key": api_key}, timeout=10)
     resp.raise_for_status()
     return resp.json().get("results", [])
 
-def format_date(date_string):
-    dt = datetime.fromisoformat(date_string)
-    dt = dt.astimezone(ZoneInfo("America/New_York"))
-    return dt.strftime("%m/%d/%Y %I:%M:%S %p %Z")
+
+def fetch_paragraphs_from_uri(uri: str, api_key: str) -> list:
+    """Fetch up to three paragraphs from the article identified by its NYT ``uri``.
+
+    Uses the Article Search API to get the web URL, then scrapes the HTML.
+    Returns a list of up to 3 paragraph strings (empty list on failure).
+    """
+    if not uri:
+        return []
+    fq = f'uri:"{uri}"'
+    search_url = "https://api.nytimes.com/svc/search/v2/articlesearch.json"
+    params = {"fq": fq, "api-key": api_key, "sort": "oldest", "page": 0}
+    try:
+        resp = requests.get(search_url, params=params, timeout=10)
+        resp.raise_for_status()
+        docs = resp.json().get("response", {}).get("docs", [])
+        if not docs:
+            return []
+        article_url = docs[0].get("web_url")
+        if not article_url:
+            return []
+        page_resp = requests.get(article_url, timeout=10)
+        page_resp.raise_for_status()
+        html = page_resp.text
+        raw = re.findall(r'<p[^>]*>(.*?)</p>', html, re.DOTALL | re.IGNORECASE)
+        cleaned = []
+        for p in raw:
+            text = re.sub(r'<[^>]+>', '', p).strip()
+            if text:
+                cleaned.append(text)
+            if len(cleaned) >= 3:
+                break
+        return cleaned
+    except Exception as exc:
+        logging.getLogger(__name__).debug(f"Failed to fetch paragraphs for uri {uri}: {exc}")
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Printer
+# ---------------------------------------------------------------------------
 
 def print_story(payload: str, printer: str):
-    """Send plain‑text to the configured CUPS printer.
-
-    CUPS reads from stdin when the final argument is "-".
-    """
+    """Send plain-text payload to the configured CUPS printer via stdin."""
     subprocess.run(
         ["lp", "-d", printer, "-"],
         input=payload.encode("utf-8"),
         check=True,
     )
+
 
 # ---------------------------------------------------------------------------
 # Main loop
@@ -123,7 +148,7 @@ def print_story(payload: str, printer: str):
 def main():
     cfg = load_config()
     state_path = pathlib.Path(cfg["state_path"])
-    printed_ids = load_state(state_path)
+    state = load_state(state_path)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -131,7 +156,6 @@ def main():
     )
     logger = logging.getLogger(__name__)
 
-    # Parse command‑line arguments
     parser = argparse.ArgumentParser(
         description="NYT headline daemon – default prints to STDOUT; use -t/--teletype to send to printer"
     )
@@ -143,34 +167,46 @@ def main():
     while True:
         try:
             articles = fetch_top_stories(cfg["nyt_api_key"], cfg["section"])
-            articles.sort(
-                key=lambda article: datetime.fromisoformat(article["published_date"])
-            )
             for art in articles:
-                uid = art.get("uri")  # unique identifier for the article
-                if uid in printed_ids:
-                    continue
-                title = art.get("title", "(no title)")
-                # Try the lead paragraph that may already be present; fall back to abstract.
-                lead = art.get("lead_paragraph") or art.get("abstract", "")
-                # If still missing, fetch it via the Article Search API using the article's URI.
-                if not lead:
-                    lead = fetch_lead_paragraph_from_uri(uid, cfg["nyt_api_key"])
-                if not lead:
-                    # Nothing printable – skip but mark as seen to avoid repeated attempts.
-                    printed_ids.add(uid)
+                uid = art.get("uri")
+                if uid in state:
                     continue
 
-                published_date = format_date(art.get("published_date"))
-                payload = f"{published_date}\n{title}\n{lead}\n\n".upper()
+                # Extract and format updated timestamp
+                updated = art.get("updated") or art.get("updated_date") or ""
+                date_str = format_updated(updated)
+
+                # Uppercase headline
+                title = art.get("title", "(no title)").upper()
+
+                # Use abstract if available
+                lead = art.get("abstract")
+                if lead:
+                    paragraphs = [lead]
+                else:
+                    paragraphs = fetch_paragraphs_from_uri(uid, cfg["nyt_api_key"])
+
+                if not paragraphs:
+                    # Nothing printable – mark seen to avoid repeated attempts
+                    state[uid] = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+                    continue
+
+                # Uppercase each paragraph; indent first line five spaces (newswire style)
+                body = "\n".join("     " + p.upper() for p in paragraphs)
+
+                # Build final payload before any output
+                payload = f"{date_str}\n{title}\n{body}\n"
+
                 if teletype:
                     print_story(payload, cfg["printer_name"])
                     logger.info(f"Printed: {title}")
                 else:
                     print(payload)
-                printed_ids.add(uid)
-            save_state(state_path, printed_ids)
-        except Exception as e:
+
+                state[uid] = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+
+            save_state(state_path, state)
+        except Exception:
             logger.exception("Error during polling/printing")
 
         time.sleep(cfg.get("poll_interval_seconds", 300))
