@@ -1,0 +1,15 @@
+[Unit]
+Description=NYT Headline Teletype Daemon
+After=network-online.target cups.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=%h/nyt-headlines-printer
+ExecStart=%h/nyt-headlines-printer/main.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
