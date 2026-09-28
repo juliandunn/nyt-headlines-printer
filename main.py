@@ -5,7 +5,6 @@ Continuously polls the New York Times Top Stories API, prints new headlines
 and the first paragraph to a CUPS printer (e.g., OKI520) via the `lp`
 command, and remembers which stories have already been printed.
 """
-
 import json
 import pathlib
 import time
@@ -13,6 +12,8 @@ import logging
 import subprocess
 import requests
 import urllib.parse
+import argparse
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -42,12 +43,12 @@ def fetch_lead_paragraph_from_uri(uri: str, api_key: str) -> str:
 
     The NYT Article Search API supports a filter query (``fq``) on the ``uri``
     field.  We request the ``lead_paragraph`` field and return it if present.
-    If the API call fails or the field is missing, an empty string is returned.
+    If the API call fails or the field is missing, we fall back to fetching the
+    article's web page and extracting the first paragraph from the HTML.
     """
     if not uri:
         return ""
-    # The ``uri`` field can contain characters like ':' and '/' which need to be
-    # URL‑encoded when used inside the ``fq`` parameter.
+    # Build filter query for the Article Search API.
     fq = f'uri:"{uri}"'
     search_url = "https://api.nytimes.com/svc/search/v2/articlesearch.json"
     params = {
@@ -62,7 +63,25 @@ def fetch_lead_paragraph_from_uri(uri: str, api_key: str) -> str:
         docs = resp.json().get("response", {}).get("docs", [])
         if not docs:
             return ""
-        return docs[0].get("lead_paragraph", "") or ""
+        # Prefer the lead_paragraph if available.
+        lead = docs[0].get("lead_paragraph", "")
+        if lead:
+            return lead
+        # Otherwise attempt to scrape the first paragraph from the article URL.
+        article_url = docs[0].get("web_url")
+        if not article_url:
+            return ""
+        page_resp = requests.get(article_url, timeout=10)
+        page_resp.raise_for_status()
+        html = page_resp.text
+        # Simple regex to find the first <p> element with non‑empty content.
+        import re
+        match = re.search(r'<p[^>]*>(.*?)</p>', html, re.DOTALL | re.IGNORECASE)
+        if match:
+            # Strip HTML tags that may be inside the paragraph.
+            paragraph = re.sub(r'<[^>]+>', '', match.group(1))
+            return paragraph.strip()
+        return ""
     except Exception as exc:
         logging.getLogger(__name__).debug(
             f"Failed to fetch lead paragraph for uri {uri}: {exc}"
@@ -109,6 +128,15 @@ def main():
     )
     logger = logging.getLogger(__name__)
 
+    # Parse command‑line arguments
+    parser = argparse.ArgumentParser(
+        description="NYT headline daemon – default prints to STDOUT; use -t/--teletype to send to printer"
+    )
+    parser.add_argument("-t", "--teletype", action="store_true",
+                        help="Redirect output to the configured teletype printer")
+    args = parser.parse_args()
+    teletype = args.teletype
+
     while True:
         try:
             articles = fetch_top_stories(cfg["nyt_api_key"], cfg["section"])
@@ -127,7 +155,10 @@ def main():
                     printed_ids.add(uid)
                     continue
 
-                print_story(title, lead, cfg["printer_name"])
+                if teletype:
+                    print_story(title, lead, cfg["printer_name"])
+                else:
+                    print(f"{title}\n{'=' * len(title)}\n\n{lead}\n")
                 printed_ids.add(uid)
                 logger.info(f"Printed: {title}")
             save_state(state_path, printed_ids)
