@@ -143,6 +143,9 @@ def main():
     while True:
         try:
             articles = fetch_top_stories(cfg["nyt_api_key"], cfg["section"])
+            articles.sort(
+                key=lambda article: datetime.fromisoformat(article["published_date"])
+            )
             for art in articles:
                 uid = art.get("uri")  # unique identifier for the article
                 if uid in printed_ids:
