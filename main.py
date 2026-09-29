@@ -236,6 +236,7 @@ def main():
     )
     logger = logging.getLogger(__name__)
 
+    logger.info("Entering polling loop")
     while True:
         try:
             articles = fetch_top_stories(cfg["nyt_api_key"], cfg["section"])
