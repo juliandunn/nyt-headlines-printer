@@ -2,19 +2,17 @@
 """NYT Headline Teletype Daemon for Raspberry Pi (Raspbian)
 
 Continuously polls the New York Times Top Stories API, prints new headlines
-and the first three paragraphs to a CUPS printer (e.g., OKI520) via the `lp`
-command, and remembers which stories have already been printed.
+and abstracts to a CUPS printer (e.g., OKI520) via the `lp` command, and
+remembers which stories have already been printed.
 """
-import json
-import pathlib
-import time
-import logging
-import subprocess
-import datetime
 import argparse
+import datetime
 import html
-import re
-import http.cookiejar
+import json
+import logging
+import pathlib
+import subprocess
+import time
 
 import requests
 
@@ -89,7 +87,7 @@ def clean_text(text: str) -> str:
 def format_updated(updated: str) -> str:
     """Parse an ISO 8601 timestamp and return a human-readable date + time string.
 
-    Output format: YYYY-MM-DD HH:MM AM/PM ±HHMM
+    Output format: MM/DD/YYYY HH:MM AM/PM ±HHMM
     Falls back to the raw string on parse failure.
     """
     if not updated:
@@ -113,89 +111,6 @@ def fetch_top_stories(api_key: str, section: str) -> list:
     return resp.json().get("results", [])
 
 
-def load_cookie_jar(cookies_path: pathlib.Path) -> http.cookiejar.MozillaCookieJar | None:
-    """Load a MozillaCookieJar from a cookies file.
-
-    Handles standard tab-separated files as well as space-separated files
-    or millisecond timestamps gracefully.
-    """
-    if not cookies_path.is_file():
-        return None
-    cj = http.cookiejar.MozillaCookieJar()
-    try:
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            cj.load(cookies_path, ignore_discard=True, ignore_expires=True)
-        return cj
-    except Exception:
-        try:
-            import io
-            lines = cookies_path.read_text().splitlines()
-            fixed_lines = ["# Netscape HTTP Cookie File"]
-            for line in lines:
-                if line.strip() and not line.startswith("#"):
-                    parts = line.split()
-                    if len(parts) >= 7:
-                        if parts[4].isdigit() and int(parts[4]) > 10000000000:
-                            parts[4] = str(int(parts[4]) // 1000)
-                        fixed_lines.append("\t".join(parts[:7]))
-            temp_cj = http.cookiejar.MozillaCookieJar()
-            temp_cj._really_load(io.StringIO("\n".join(fixed_lines)), str(cookies_path), True, True)
-            return temp_cj
-        except Exception as exc:
-            logging.getLogger(__name__).debug(f"Failed to load cookies.txt: {exc}")
-            return None
-
-
-def fetch_paragraphs_from_uri(uri: str, api_key: str) -> list:
-    """Fetch up to three paragraphs from the article identified by its NYT ``uri``.
-
-    Uses the Article Search API to get the web URL, then scrapes the HTML
-    using cookies from cookies.txt if available.
-    Returns a list of up to 3 paragraph strings (empty list on failure).
-    """
-    if not uri:
-        return []
-    fq = f'uri:"{uri}"'
-    search_url = "https://api.nytimes.com/svc/search/v2/articlesearch.json"
-    params = {"fq": fq, "api-key": api_key, "sort": "oldest", "page": 0}
-    try:
-        resp = requests.get(search_url, params=params, timeout=10)
-        resp.raise_for_status()
-        docs = resp.json().get("response", {}).get("docs", [])
-        if not docs:
-            return []
-        article_url = docs[0].get("web_url")
-        if not article_url:
-            return []
-
-        cookies_path = pathlib.Path(__file__).with_name("cookies.txt")
-        cookie_jar = load_cookie_jar(cookies_path)
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-
-        page_resp = requests.get(article_url, headers=headers, cookies=cookie_jar, timeout=10)
-        page_resp.raise_for_status()
-        html_text = page_resp.content.decode("utf-8", errors="replace")
-        raw = re.findall(r'<p[^>]*>(.*?)</p>', html_text, re.DOTALL | re.IGNORECASE)
-        cleaned = []
-        for p in raw:
-            text = clean_text(re.sub(r'<[^>]+>', '', p)).strip()
-            if text:
-                cleaned.append(text)
-            if len(cleaned) >= 3:
-                break
-        return cleaned
-    except Exception as exc:
-        logging.getLogger(__name__).debug(f"Failed to fetch paragraphs for uri {uri}: {exc}")
-        return []
-
-
 # ---------------------------------------------------------------------------
 # Printer
 # ---------------------------------------------------------------------------
@@ -204,7 +119,7 @@ def print_story(payload: str, printer: str):
     """Send plain-text payload to the configured CUPS printer via stdin."""
     cleaned_payload = clean_text(payload)
     subprocess.run(
-        ["lp", "-d", printer, "-"],
+        ["lp", "-s", "-d", printer, "-"],
         input=cleaned_payload.encode("utf-8", errors="replace"),
         check=True,
     )
@@ -252,21 +167,15 @@ def main():
                 # Uppercase headline
                 title = clean_text(art.get("title", "(no title)")).upper()
 
-                # Try scraping paragraphs from article web URL first
-                paragraphs = fetch_paragraphs_from_uri(uid, cfg["nyt_api_key"])
-                if not paragraphs:
-                    # Fall back to abstract from Top Stories payload if scraping failed
-                    abstract = art.get("abstract")
-                    if abstract:
-                        paragraphs = [clean_text(abstract)]
-
-                if not paragraphs:
+                # Extract abstract from Top Stories payload
+                abstract = art.get("abstract")
+                if not abstract:
                     # Nothing printable – mark seen to avoid repeated attempts
                     state[uid] = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
                     continue
 
-                # Uppercase each paragraph; indent first line five spaces (newswire style)
-                body = "\n".join("     " + p.upper() for p in paragraphs)
+                # Uppercase abstract; indent first line five spaces (newswire style)
+                body = "     " + clean_text(abstract).upper()
 
                 # Build final payload before any output
                 payload = f"{date_str}\n{title}\n{body}\n\n"

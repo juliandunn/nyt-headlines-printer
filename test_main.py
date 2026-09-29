@@ -70,7 +70,7 @@ class TestNYTPrinter(unittest.TestCase):
     def test_format_updated_valid_iso(self):
         iso_str = "2026-09-28T10:20:00-07:00"
         formatted = main.format_updated(iso_str)
-        self.assertEqual(formatted, "2026-09-28 10:20 AM -0700")
+        self.assertEqual(formatted, "09/28/2026 10:20 AM -0700")
 
     def test_format_updated_invalid(self):
         invalid_str = "not-a-timestamp"
@@ -80,88 +80,7 @@ class TestNYTPrinter(unittest.TestCase):
         self.assertEqual(main.format_updated(""), "")
 
     # ---------------------------------------------------------------------------
-    # 3. Cookie Loading Tests (load_cookie_jar)
-    # ---------------------------------------------------------------------------
-
-    def test_load_cookie_jar_tab_separated(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cookies_file = pathlib.Path(tmpdir) / "cookies.txt"
-            content = (
-                "# Netscape HTTP Cookie File\n"
-                ".nytimes.com\tTRUE\t/\tTRUE\t1822104340\tNYT-S\tsome_cookie_value\n"
-            )
-            cookies_file.write_text(content)
-
-            cj = main.load_cookie_jar(cookies_file)
-            self.assertIsNotNone(cj)
-            cookies = list(cj)
-            self.assertEqual(len(cookies), 1)
-            self.assertEqual(cookies[0].name, "NYT-S")
-            self.assertEqual(cookies[0].value, "some_cookie_value")
-
-    def test_load_cookie_jar_space_separated_and_ms_timestamp(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cookies_file = pathlib.Path(tmpdir) / "cookies.txt"
-            # Space separated line with millisecond timestamp
-            content = (
-                "# HTTP Cookie File\n"
-                ".nytimes.com TRUE / TRUE 1822104340000 NYT-S space_cookie_val\n"
-            )
-            cookies_file.write_text(content)
-
-            cj = main.load_cookie_jar(cookies_file)
-            self.assertIsNotNone(cj)
-            cookies = list(cj)
-            self.assertEqual(len(cookies), 1)
-            self.assertEqual(cookies[0].name, "NYT-S")
-            self.assertEqual(cookies[0].value, "space_cookie_val")
-
-    def test_load_cookie_jar_nonexistent(self):
-        cookies_file = pathlib.Path("/nonexistent/cookies.txt")
-        self.assertIsNone(main.load_cookie_jar(cookies_file))
-
-    # ---------------------------------------------------------------------------
-    # 4. Paragraph Scraping Tests (fetch_paragraphs_from_uri)
-    # ---------------------------------------------------------------------------
-
-    @patch("main.requests.get")
-    def test_fetch_paragraphs_from_uri_success(self, mock_get):
-        # Mock Article Search API response
-        mock_search_resp = MagicMock()
-        mock_search_resp.json.return_value = {
-            "response": {"docs": [{"web_url": "https://www.nytimes.com/test-article"}]}
-        }
-        mock_search_resp.raise_for_status = MagicMock()
-
-        # Mock article HTML response
-        mock_html_resp = MagicMock()
-        mock_html_resp.content = (
-            b"<html><body>"
-            b"<p>First paragraph with <b>bold</b> text.</p>"
-            b"<p>Second paragraph text.</p>"
-            b"<p>Third paragraph text.</p>"
-            b"<p>Fourth paragraph text that should be ignored.</p>"
-            b"</body></html>"
-        )
-        mock_html_resp.raise_for_status = MagicMock()
-
-        mock_get.side_effect = [mock_search_resp, mock_html_resp]
-
-        paragraphs = main.fetch_paragraphs_from_uri("nyt://article/123", "dummy_key")
-
-        self.assertEqual(len(paragraphs), 3)
-        self.assertEqual(paragraphs[0], "First paragraph with bold text.")
-        self.assertEqual(paragraphs[1], "Second paragraph text.")
-        self.assertEqual(paragraphs[2], "Third paragraph text.")
-
-    @patch("main.requests.get")
-    def test_fetch_paragraphs_from_uri_api_error(self, mock_get):
-        mock_get.side_effect = Exception("Network error")
-        paragraphs = main.fetch_paragraphs_from_uri("nyt://article/123", "dummy_key")
-        self.assertEqual(paragraphs, [])
-
-    # ---------------------------------------------------------------------------
-    # 5. Top Stories Endpoint Tests (fetch_top_stories)
+    # 3. Top Stories Endpoint Tests (fetch_top_stories)
     # ---------------------------------------------------------------------------
 
     @patch("main.requests.get")
@@ -178,14 +97,14 @@ class TestNYTPrinter(unittest.TestCase):
         self.assertEqual(articles[0]["title"], "Test Title")
 
     # ---------------------------------------------------------------------------
-    # 6. Printer Dispatch Tests (print_story)
+    # 4. Printer Dispatch Tests (print_story)
     # ---------------------------------------------------------------------------
 
     @patch("main.subprocess.run")
     def test_print_story(self, mock_run):
         main.print_story("TEST PAYLOAD", "oki520")
         mock_run.assert_called_once_with(
-            ["lp", "-d", "oki520", "-"],
+            ["lp", "-s", "-d", "oki520", "-"],
             input=b"TEST PAYLOAD",
             check=True,
         )

@@ -6,11 +6,11 @@ A Python daemon that polls the New York Times Top Stories API and prints breakin
 
 1. On each polling cycle (default: every 5 minutes), the daemon fetches the latest articles from the NYT Top Stories API.
 2. For each article not yet printed, it builds a payload:
-   - The article's **last-updated date**
+   - The article's **last-updated date & time** (`MM/DD/YYYY HH:MM AM/PM ±HHMM`)
    - The **headline** in ALL CAPS
-   - Up to **three paragraphs** of the article body, each in ALL CAPS with the first line indented five spaces (classic newswire style)
+   - The **article abstract**, in ALL CAPS with the first line indented five spaces (classic newswire style)
 3. The payload is either printed to **stdout** (default) or sent to a CUPS printer via `lp`.
-4. Each printed article's URI is saved to a state file so it is never printed twice.
+4. Each printed article's URI is saved to a state file (with 5-day TTL auto-pruning) so it is never printed twice.
 
 ## Requirements
 
