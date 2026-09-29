@@ -268,7 +268,7 @@ def main():
                 body = "\n".join("     " + p.upper() for p in paragraphs)
 
                 # Build final payload before any output
-                payload = f"{date_str}\n{title}\n{body}\n"
+                payload = f"{date_str}\n{title}\n{body}\n\n"
 
                 if teletype:
                     print_story(payload, cfg["printer_name"])
