@@ -96,7 +96,7 @@ def format_updated(updated: str) -> str:
         return ""
     try:
         dt = datetime.datetime.fromisoformat(updated)
-        return dt.strftime("%Y-%m-%d %I:%M %p %z").strip()
+        return dt.strftime("%m/%d/%Y %I:%M %p %z").strip()
     except ValueError:
         return updated
 
